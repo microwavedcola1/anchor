@@ -22,9 +22,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 AccountField::CompositeField(s) => {
                     let name = &s.ident;
                     let ty = &s.raw_field.ty;
+                    let log = format!("{} try_accounts", name);
                     quote! {
-                        #[cfg(feature = "anchor-debug")]
-                        ::solana_program::log::sol_log(stringify!(#name));
+                        //#[cfg(feature = "anchor-debug")]
+                        ::solana_program::log::sol_log(#log);
                         let #name: #ty = anchor_lang::Accounts::try_accounts(program_id, accounts, ix_data)?;
                     }
                 }
@@ -40,9 +41,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         }
                     } else {
                         let name = f.typed_ident();
+                        let log = format!("{} try_accounts", name);
                         quote! {
-                            #[cfg(feature = "anchor-debug")]
-                            ::solana_program::log::sol_log(stringify!(#name));
+                            //#[cfg(feature = "anchor-debug")]
+                            ::solana_program::log::sol_log(#log);
                             let #name = anchor_lang::Accounts::try_accounts(program_id, accounts, ix_data)?;
                         }
                     }

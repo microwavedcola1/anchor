@@ -17,7 +17,10 @@ pub fn generate(f: &Field) -> proc_macro2::TokenStream {
         .map(|c| generate_constraint(f, c))
         .collect();
 
+    let log = format!("{} constraints", &f.ident);
+
     quote! {
+        ::solana_program::log::sol_log(#log);
         #rent
         #(#checks)*
     }
