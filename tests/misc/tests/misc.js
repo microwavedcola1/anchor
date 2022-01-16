@@ -7,6 +7,7 @@ const {
   Token,
 } = require("@solana/spl-token");
 const miscIdl = require("../target/idl/misc.json");
+const { SystemProgram } = require("@solana/web3.js");
 const utf8 = anchor.utils.bytes.utf8;
 
 describe("misc", () => {
@@ -613,65 +614,117 @@ describe("misc", () => {
     assert.equal(account2.idata, 3);
   });
 
-  let associatedToken = null;
-
-  it("Can create an associated token account", async () => {
-    associatedToken = await Token.getAssociatedTokenAddress(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
-      mint.publicKey,
-      program.provider.wallet.publicKey
-    );
-
-    await program.rpc.testInitAssociatedToken({
-      accounts: {
-        token: associatedToken,
-        mint: mint.publicKey,
-        payer: program.provider.wallet.publicKey,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      },
-    });
-    const client = new Token(
+  describe("associated_token constraints", () => {
+    let associatedToken = null;
+    // apparently cannot await here so doing it in the 'it' statements
+    let client = Token.createMint(
       program.provider.connection,
-      mint.publicKey,
-      TOKEN_PROGRAM_ID,
-      program.provider.wallet.payer
+      program.provider.wallet.payer,
+      program.provider.wallet.publicKey,
+      program.provider.wallet.publicKey,
+      9,
+      TOKEN_PROGRAM_ID
     );
-    const account = await client.getAccountInfo(associatedToken);
-    assert.ok(account.state === 1);
-    assert.ok(account.amount.toNumber() === 0);
-    assert.ok(account.isInitialized);
-    assert.ok(account.owner.equals(program.provider.wallet.publicKey));
-    assert.ok(account.mint.equals(mint.publicKey));
-  });
 
-  it("Can validate associated_token constraints", async () => {
-    await program.rpc.testValidateAssociatedToken({
-      accounts: {
-        token: associatedToken,
-        mint: mint.publicKey,
-        wallet: program.provider.wallet.publicKey,
-      },
+    it("Can create an associated token account", async () => {
+      const localClient = await client;
+      associatedToken = await Token.getAssociatedTokenAddress(
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+        TOKEN_PROGRAM_ID,
+        localClient.publicKey,
+        program.provider.wallet.publicKey
+      );
+
+      await program.rpc.testInitAssociatedToken({
+        accounts: {
+          token: associatedToken,
+          mint: localClient.publicKey,
+          payer: program.provider.wallet.publicKey,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        },
+      });
+
+      const account = await localClient.getAccountInfo(associatedToken);
+      assert.ok(account.state === 1);
+      assert.ok(account.amount.toNumber() === 0);
+      assert.ok(account.isInitialized);
+      assert.ok(account.owner.equals(program.provider.wallet.publicKey));
+      assert.ok(account.mint.equals(localClient.publicKey));
     });
 
-    await assert.rejects(
-      async () => {
-        await program.rpc.testValidateAssociatedToken({
-          accounts: {
-            token: associatedToken,
-            mint: mint.publicKey,
-            wallet: anchor.web3.Keypair.generate().publicKey,
-          },
-        });
-      },
-      (err) => {
-        assert.equal(err.code, 2009);
-        return true;
-      }
-    );
+    it("Can validate associated_token constraints", async () => {
+      const localClient = await client;
+      await program.rpc.testValidateAssociatedToken({
+        accounts: {
+          token: associatedToken,
+          mint: localClient.publicKey,
+          wallet: program.provider.wallet.publicKey,
+        },
+      });
+
+      let otherMint = await Token.createMint(
+        program.provider.connection,
+        program.provider.wallet.payer,
+        program.provider.wallet.publicKey,
+        program.provider.wallet.publicKey,
+        9,
+        TOKEN_PROGRAM_ID
+      );
+
+      await assert.rejects(
+        async () => {
+          await program.rpc.testValidateAssociatedToken({
+            accounts: {
+              token: associatedToken,
+              mint: otherMint.publicKey,
+              wallet: program.provider.wallet.publicKey,
+            },
+          });
+        },
+        (err) => {
+          assert.equal(err.code, 2009);
+          return true;
+        }
+      );
+    });
+
+    it("associated_token constraints check do not allow authority change", async () => {
+      const localClient = await client;
+      await program.rpc.testValidateAssociatedToken({
+        accounts: {
+          token: associatedToken,
+          mint: localClient.publicKey,
+          wallet: program.provider.wallet.publicKey,
+        },
+      });
+
+      await localClient.setAuthority(
+        associatedToken,
+        anchor.web3.Keypair.generate().publicKey,
+        "AccountOwner",
+        program.provider.wallet.payer,
+        []
+      );
+
+      await assert.rejects(
+        async () => {
+          await program.rpc.testValidateAssociatedToken({
+            accounts: {
+              token: associatedToken,
+              mint: localClient.publicKey,
+              wallet: program.provider.wallet.publicKey,
+            },
+          });
+        },
+        (err) => {
+          assert.equal(err.code, 2015);
+          return true;
+        }
+      );
+    });
   });
 
   it("Can fetch all accounts of a given type", async () => {
@@ -736,11 +789,12 @@ describe("misc", () => {
     ]);
     // Call for multiple kinds of .all.
     const allAccounts = await program.account.dataWithFilter.all();
-    const allAccountsFilteredByBuffer = await program.account.dataWithFilter.all(
-      program.provider.wallet.publicKey.toBuffer()
-    );
-    const allAccountsFilteredByProgramFilters1 = await program.account.dataWithFilter.all(
-      [
+    const allAccountsFilteredByBuffer =
+      await program.account.dataWithFilter.all(
+        program.provider.wallet.publicKey.toBuffer()
+      );
+    const allAccountsFilteredByProgramFilters1 =
+      await program.account.dataWithFilter.all([
         {
           memcmp: {
             offset: 8,
@@ -748,10 +802,9 @@ describe("misc", () => {
           },
         },
         { memcmp: { offset: 40, bytes: filterable1.toBase58() } },
-      ]
-    );
-    const allAccountsFilteredByProgramFilters2 = await program.account.dataWithFilter.all(
-      [
+      ]);
+    const allAccountsFilteredByProgramFilters2 =
+      await program.account.dataWithFilter.all([
         {
           memcmp: {
             offset: 8,
@@ -759,8 +812,7 @@ describe("misc", () => {
           },
         },
         { memcmp: { offset: 40, bytes: filterable2.toBase58() } },
-      ]
-    );
+      ]);
     // Without filters there should be 4 accounts.
     assert.equal(allAccounts.length, 4);
     // Filtering by main wallet there should be 3 accounts.
@@ -837,6 +889,24 @@ describe("misc", () => {
     assert.ok(account.data, 3);
   });
 
+  it("Can use const for array size", async () => {
+    const data = anchor.web3.Keypair.generate();
+    const tx = await program.rpc.testConstArraySize(99, {
+      accounts: {
+        data: data.publicKey,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [data],
+      instructions: [
+        await program.account.dataConstArraySize.createInstruction(data),
+      ],
+    });
+    const dataAccount = await program.account.dataConstArraySize.fetch(
+      data.publicKey
+    );
+    assert.deepStrictEqual(dataAccount.data, [99, ...new Array(9).fill(0)]);
+  });
+
   it("Should include BASE const in IDL", async () => {
     assert(
       miscIdl.constants.find(
@@ -861,14 +931,17 @@ describe("misc", () => {
   });
 
   it("init_if_needed throws if account exists but is not owned by the expected program", async () => {
-    const newAcc = await anchor.web3.PublicKey.findProgramAddress([utf8.encode("hello")], program.programId);
+    const newAcc = await anchor.web3.PublicKey.findProgramAddress(
+      [utf8.encode("hello")],
+      program.programId
+    );
     await program.rpc.testInitIfNeededChecksOwner({
       accounts: {
         data: newAcc[0],
         systemProgram: anchor.web3.SystemProgram.programId,
         payer: program.provider.wallet.publicKey,
-        owner: program.programId
-      }
+        owner: program.programId,
+      },
     });
 
     try {
@@ -877,7 +950,7 @@ describe("misc", () => {
           data: newAcc[0],
           systemProgram: anchor.web3.SystemProgram.programId,
           payer: program.provider.wallet.publicKey,
-          owner: anchor.web3.Keypair.generate().publicKey
+          owner: anchor.web3.Keypair.generate().publicKey,
         },
       });
       assert.ok(false);
@@ -887,20 +960,26 @@ describe("misc", () => {
   });
 
   it("init_if_needed throws if pda account exists but does not have the expected seeds", async () => {
-    const newAcc = await anchor.web3.PublicKey.findProgramAddress([utf8.encode("nothello")], program.programId);
+    const newAcc = await anchor.web3.PublicKey.findProgramAddress(
+      [utf8.encode("nothello")],
+      program.programId
+    );
     await program.rpc.testInitIfNeededChecksSeeds("nothello", {
       accounts: {
         data: newAcc[0],
         systemProgram: anchor.web3.SystemProgram.programId,
         payer: program.provider.wallet.publicKey,
-      }
+      },
     });
 
     // this will throw if it is not a proper PDA
     // we need this so we know that the following tx failed
     // not because it couldn't create this pda
     // but because the two pdas were different
-    anchor.web3.PublicKey.createProgramAddress([utf8.encode("hello")], program.programId);
+    anchor.web3.PublicKey.createProgramAddress(
+      [utf8.encode("hello")],
+      program.programId
+    );
 
     try {
       await program.rpc.testInitIfNeededChecksSeeds("hello", {
@@ -908,7 +987,7 @@ describe("misc", () => {
           data: newAcc[0],
           systemProgram: anchor.web3.SystemProgram.programId,
           payer: program.provider.wallet.publicKey,
-          owner: anchor.web3.Keypair.generate().publicKey
+          owner: anchor.web3.Keypair.generate().publicKey,
         },
       });
       assert.ok(false);
@@ -916,8 +995,6 @@ describe("misc", () => {
       assert.equal(err.code, 2006);
     }
   });
-
-
 
   it("init_if_needed throws if account exists but is not the expected space", async () => {
     const newAcc = anchor.web3.Keypair.generate();
@@ -959,7 +1036,7 @@ describe("misc", () => {
     });
 
     try {
-      await program.rpc.testInitMintIfNeeded(6,{
+      await program.rpc.testInitMintIfNeeded(6, {
         accounts: {
           mint: mint.publicKey,
           payer: program.provider.wallet.publicKey,
@@ -967,7 +1044,7 @@ describe("misc", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           rent: anchor.web3.SYSVAR_RENT_PUBKEY,
           mintAuthority: anchor.web3.Keypair.generate().publicKey,
-          freezeAuthority: program.provider.wallet.publicKey
+          freezeAuthority: program.provider.wallet.publicKey,
         },
         signers: [mint],
       });
@@ -991,7 +1068,7 @@ describe("misc", () => {
     });
 
     try {
-      await program.rpc.testInitMintIfNeeded(6,{
+      await program.rpc.testInitMintIfNeeded(6, {
         accounts: {
           mint: mint.publicKey,
           payer: program.provider.wallet.publicKey,
@@ -999,7 +1076,7 @@ describe("misc", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           rent: anchor.web3.SYSVAR_RENT_PUBKEY,
           mintAuthority: program.provider.wallet.publicKey,
-          freezeAuthority: anchor.web3.Keypair.generate().publicKey
+          freezeAuthority: anchor.web3.Keypair.generate().publicKey,
         },
         signers: [mint],
       });
@@ -1023,7 +1100,7 @@ describe("misc", () => {
     });
 
     try {
-      await program.rpc.testInitMintIfNeeded(9,{
+      await program.rpc.testInitMintIfNeeded(9, {
         accounts: {
           mint: mint.publicKey,
           payer: program.provider.wallet.publicKey,
@@ -1031,7 +1108,7 @@ describe("misc", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           rent: anchor.web3.SYSVAR_RENT_PUBKEY,
           mintAuthority: program.provider.wallet.publicKey,
-          freezeAuthority: program.provider.wallet.publicKey
+          freezeAuthority: program.provider.wallet.publicKey,
         },
         signers: [mint],
       });
@@ -1185,14 +1262,14 @@ describe("misc", () => {
           systemProgram: anchor.web3.SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          authority: anchor.web3.Keypair.generate().publicKey
+          authority: anchor.web3.Keypair.generate().publicKey,
         },
       });
       assert.ok(false);
     } catch (err) {
       assert.equal(err.code, 2015);
     }
-  })
+  });
 
   it("init_if_needed throws if associated token exists but has the wrong mint", async () => {
     const mint = anchor.web3.Keypair.generate();
@@ -1248,14 +1325,104 @@ describe("misc", () => {
           systemProgram: anchor.web3.SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          authority: program.provider.wallet.publicKey
+          authority: program.provider.wallet.publicKey,
         },
       });
       assert.ok(false);
     } catch (err) {
       assert.equal(err.code, 2014);
     }
-  })
+  });
+
+  it("init_if_needed throws if token exists with correct owner and mint but is not the ATA", async () => {
+    const mint = anchor.web3.Keypair.generate();
+    await program.rpc.testInitMint({
+      accounts: {
+        mint: mint.publicKey,
+        payer: program.provider.wallet.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [mint],
+    });
+
+    const associatedToken = await Token.getAssociatedTokenAddress(
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+      TOKEN_PROGRAM_ID,
+      mint.publicKey,
+      program.provider.wallet.publicKey
+    );
+
+    await program.rpc.testInitAssociatedToken({
+      accounts: {
+        token: associatedToken,
+        mint: mint.publicKey,
+        payer: program.provider.wallet.publicKey,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      },
+    });
+
+    const token = anchor.web3.Keypair.generate();
+    await program.rpc.testInitToken({
+      accounts: {
+        token: token.publicKey,
+        mint: mint.publicKey,
+        payer: program.provider.wallet.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [token],
+    });
+
+    try {
+      await program.rpc.testInitAssociatedTokenIfNeeded({
+        accounts: {
+          token: token.publicKey,
+          mint: mint.publicKey,
+          payer: program.provider.wallet.publicKey,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          authority: program.provider.wallet.publicKey,
+        },
+      });
+      assert.ok(false);
+    } catch (err) {
+      assert.equal(err.code, 3014);
+    }
+  });
+
+  it("init_if_needed checks rent_exemption if init is not needed", async () => {
+    const data = anchor.web3.Keypair.generate();
+    await program.rpc.initDecreaseLamports({
+      accounts: {
+        data: data.publicKey,
+        user: anchor.getProvider().wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      },
+      signers: [data],
+    });
+
+    try {
+      await program.rpc.initIfNeededChecksRentExemption({
+        accounts: {
+          data: data.publicKey,
+          user: anchor.getProvider().wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        },
+        signers: [data],
+      });
+      assert.ok(false);
+    } catch (err) {
+      assert.equal(err.code, 2005);
+    }
+  });
 
   it("Can use multidimensional array", async () => {
     const array2d = new Array(10).fill(new Array(10).fill(99));
@@ -1274,5 +1441,191 @@ describe("misc", () => {
       data.publicKey
     );
     assert.deepStrictEqual(dataAccount.data, array2d);
+  });
+
+  it("allows non-rent exempt accounts", async () => {
+    const data = anchor.web3.Keypair.generate();
+    await program.rpc.initializeNoRentExempt({
+      accounts: {
+        data: data.publicKey,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [data],
+      instructions: [
+        SystemProgram.createAccount({
+          programId: program.programId,
+          space: 8 + 16 + 16,
+          lamports:
+            await program.provider.connection.getMinimumBalanceForRentExemption(
+              39
+            ),
+          fromPubkey: anchor.getProvider().wallet.publicKey,
+          newAccountPubkey: data.publicKey,
+        }),
+      ],
+    });
+    await program.rpc.testNoRentExempt({
+      accounts: {
+        data: data.publicKey,
+      },
+    });
+  });
+
+  it("allows rent exemption to be skipped", async () => {
+    const data = anchor.web3.Keypair.generate();
+    await program.rpc.initializeSkipRentExempt({
+      accounts: {
+        data: data.publicKey,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [data],
+      instructions: [
+        SystemProgram.createAccount({
+          programId: program.programId,
+          space: 8 + 16 + 16,
+          lamports:
+            await program.provider.connection.getMinimumBalanceForRentExemption(
+              39
+            ),
+          fromPubkey: anchor.getProvider().wallet.publicKey,
+          newAccountPubkey: data.publicKey,
+        }),
+      ],
+    });
+  });
+
+  it("can use rent_exempt to enforce rent exemption", async () => {
+    const data = anchor.web3.Keypair.generate();
+    await program.rpc.initializeSkipRentExempt({
+      accounts: {
+        data: data.publicKey,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      },
+      signers: [data],
+      instructions: [
+        SystemProgram.createAccount({
+          programId: program.programId,
+          space: 8 + 16 + 16,
+          lamports:
+            await program.provider.connection.getMinimumBalanceForRentExemption(
+              39
+            ),
+          fromPubkey: anchor.getProvider().wallet.publicKey,
+          newAccountPubkey: data.publicKey,
+        }),
+      ],
+    });
+
+    try {
+      await program.rpc.testEnforceRentExempt({
+        accounts: {
+          data: data.publicKey,
+        },
+      });
+      assert.ok(false);
+    } catch (err) {
+      assert.equal(2005, err.code);
+      assert.equal("A rent exempt constraint was violated", err.msg);
+    }
+  });
+
+  describe("Can validate PDAs derived from other program ids", () => {
+    it("With bumps using create_program_address", async () => {
+      const [firstPDA, firstBump] =
+        await anchor.web3.PublicKey.findProgramAddress(
+          [anchor.utils.bytes.utf8.encode("seed")],
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+      const [secondPDA, secondBump] =
+        await anchor.web3.PublicKey.findProgramAddress(
+          [anchor.utils.bytes.utf8.encode("seed")],
+          program.programId
+        );
+
+      // correct bump but wrong address
+      const wrongAddress = anchor.web3.Keypair.generate().publicKey;
+      try {
+        await program.rpc.testProgramIdConstraint(firstBump, secondBump, {
+          accounts: {
+            first: wrongAddress,
+            second: secondPDA,
+          },
+        });
+        assert.ok(false);
+      } catch (err) {
+        assert.equal(err.code, 2006);
+      }
+
+      // matching bump seed for wrong address but derived from wrong program
+      try {
+        await program.rpc.testProgramIdConstraint(secondBump, secondBump, {
+          accounts: {
+            first: secondPDA,
+            second: secondPDA,
+          },
+        });
+        assert.ok(false);
+      } catch (err) {
+        assert.equal(err.code, 2006);
+      }
+
+      // correct inputs should lead to successful tx
+      await program.rpc.testProgramIdConstraint(firstBump, secondBump, {
+        accounts: {
+          first: firstPDA,
+          second: secondPDA,
+        },
+      });
+    });
+
+    it("With bumps using find_program_address", async () => {
+      const firstPDA = (
+        await anchor.web3.PublicKey.findProgramAddress(
+          [anchor.utils.bytes.utf8.encode("seed")],
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        )
+      )[0];
+      const secondPDA = (
+        await anchor.web3.PublicKey.findProgramAddress(
+          [anchor.utils.bytes.utf8.encode("seed")],
+          program.programId
+        )
+      )[0];
+
+      // random wrong address
+      const wrongAddress = anchor.web3.Keypair.generate().publicKey;
+      try {
+        await program.rpc.testProgramIdConstraintFindPda({
+          accounts: {
+            first: wrongAddress,
+            second: secondPDA,
+          },
+        });
+        assert.ok(false);
+      } catch (err) {
+        assert.equal(err.code, 2006);
+      }
+
+      // same seeds but derived from wrong program
+      try {
+        await program.rpc.testProgramIdConstraintFindPda({
+          accounts: {
+            first: secondPDA,
+            second: secondPDA,
+          },
+        });
+        assert.ok(false);
+      } catch (err) {
+        assert.equal(err.code, 2006);
+      }
+
+      // correct inputs should lead to successful tx
+      await program.rpc.testProgramIdConstraintFindPda({
+        accounts: {
+          first: firstPDA,
+          second: secondPDA,
+        },
+      });
+    });
   });
 });
